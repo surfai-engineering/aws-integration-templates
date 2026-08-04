@@ -32,7 +32,7 @@ Unlike the org-level template, this one can be deployed by any IAM administrator
 
 By default (see [Customizing role permissions](#customizing-role-permissions) below to change this), the role is read-only, but its scope is broader than basic inventory or config visibility — it can read resource *content*, not just metadata:
 
-- `SecurityAudit` and `ReadOnlyAccess` (AWS managed policies): S3 object contents, DynamoDB items, CloudWatch Logs events, SQS message bodies (via `ReceiveMessage`), and more, across most AWS services.
+- `SecurityAudit` and `ReadOnlyAccess` (AWS managed policies): S3 object contents, DynamoDB items, CloudWatch Logs events, SQS message bodies (via `ReceiveMessage`), and more, across most AWS services. This includes end-user personal data where you store it in AWS — notably every user record in every Cognito user pool (`cognito-idp:ListUsers`), with email addresses, phone numbers and custom attributes — which is worth checking against your privacy obligations, not just your security review.
 - `CloudWatchReadOnlyAccess` and `CloudWatchLogsReadOnlyAccess`: a small amount of additional coverage `ReadOnlyAccess` doesn't include.
 
 **This also means the role can reach several places secrets commonly end up, even though it has no direct access to a secrets manager:**

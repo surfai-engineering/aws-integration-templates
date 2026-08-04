@@ -1,5 +1,28 @@
 # Changelog
 
+## v1 — 2026-08-04 (3)
+
+Added `poc/v2/`, a revision of the minimal-permission templates whose inline `SurfAiIntegrationReadOnly` policy is 9 statements and 19 actions. Relative to `poc/v1/` it drops `RDSReadOnly` (`rds:DescribeDBInstances`), `S3ReadOnly` (`s3:ListAllMyBuckets`), the whole `OrganizationsReadOnly` statement (`organizations:ListAccounts`, `organizations:DescribeOrganization`) and `cloudwatch:ListMetrics`. `poc/v1/` is left in place and unchanged, so anything already deployed from it keeps resolving the template it was deployed with.
+
+Two consequences worth stating rather than discovering later. Without `organizations:ListAccounts`, the management-account role cannot enumerate the organization's accounts, so that account list has to be supplied to Surf AI by hand. And `cloudwatch:GetMetricData` without `cloudwatch:ListMetrics` can read a metric whose name is already known but cannot discover which metrics exist, which is the usual prerequisite for reading the S3 request metrics this template enables by default.
+
+The role's effective access to RDS and S3 listing does not change either way: the AWS managed `SecurityAudit` policy, which the role still carries, grants `rds:Describe*` and `s3:ListAllMyBuckets` in its own right. Removing them from the inline policy narrows what Surf AI documents as calling, not what the role is able to call.
+
+`poc/v2/surfai-integration-role-org.yaml` points its StackSets at `poc/v2/surfai-integration-role.yaml`, and the publish workflow syncs `poc/v2/` alongside the existing prefixes.
+
+## v1 — 2026-08-04 (2)
+
+Added `poc/v1/`: a variant of both templates granting a minimal permission set, for evaluations that do not need the full integration scope. The role there carries the AWS managed `SecurityAudit` policy and an inline `SurfAiIntegrationReadOnly` policy enumerating 24 read-only actions, instead of `ReadOnlyAccess`, `CloudWatchReadOnlyAccess` and `CloudWatchLogsReadOnlyAccess`. It has no access to resource contents — S3 objects, DynamoDB items, CloudWatch Logs events, SQS message bodies — nor to SSM Parameter Store values. The `ManagedPolicyArns` parameter does not exist there; the grant is fixed by the template.
+
+`poc/v1/surfai-integration-role-org.yaml` points its StackSets at `poc/v1/surfai-integration-role.yaml`, so an organization deployment gets the same minimal role in every member account.
+
+In that variant the `use-existing` adoption validator requires a pre-existing role to be equivalent to one the stack would create: exactly the required managed policies, and inline policies granting exactly the documented actions — no missing and no extra. Wildcard actions, `Deny` statements, `NotAction`/`NotResource`, `Condition` blocks, a `Resource` narrower than `*`, and a permissions boundary on the role are each rejected rather than interpreted, since a check that guessed at their effect could pass a role granting more or less than it appears to.
+
+`v1/` is unchanged except for two fixes that apply regardless of the permission set:
+
+- The adoption validator paginates `list_attached_role_policies` and `list_role_policies`, and fails if the role carries a permissions boundary. Truncated results previously produced a misleading "missing required managed policies" reason, and a boundary could silently remove access the role appeared to grant.
+- README: called out explicitly that `ReadOnlyAccess` reaches end-user personal data where it is stored in AWS, notably Cognito user records with email addresses, phone numbers and custom attributes — a privacy consideration the previous wording left inside "and more, across most AWS services".
+
 ## v1 — 2026-08-04
 
 Added a `ManagedPolicyArns` parameter (both templates) controlling which IAM managed policies the role gets, instead of a fixed set. Defaults to the same four policies this template already used (`SecurityAudit`, `ReadOnlyAccess`, `CloudWatchReadOnlyAccess`, `CloudWatchLogsReadOnlyAccess`), so an existing stack updated to this revision with default parameters is unaffected. Lets Surf AI send each customer a CloudFormation console link with a permission set pre-filled to their needs instead of a fixed take-it-or-leave-it list.

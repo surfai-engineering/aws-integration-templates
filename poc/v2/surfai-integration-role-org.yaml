@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  (v1, rev 2026-08-04) Organization-level Surf AI integration. Deploys the
+  Surf AI read-only integration role to every account in this AWS
+  Organization via a service-managed StackSet (with automatic coverage of
+  accounts added later), and creates the same role in this management
+  account so Surf AI can discover the organization's member accounts. See
+  https://github.com/surfai-engineering/aws-integration-templates/blob/main/CHANGELOG.md
+  for what this revision includes.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Surf AI connection
+        Parameters:
+          - ExternalId
+          - OrganizationalUnitIds
+          - ExcludedAccountIds
+          - AlreadyConnectedAccountIds
+          - CallAs
+          - CreateManagementAccountRole
+      - Label:
+          default: S3 request activity analysis (optional, applied in every member account)
+        Parameters:
+          - EnableS3RequestMetrics
+          - AutoEnableNewBuckets
+    ParameterLabels:
+      ExternalId:
+        default: External ID (provided by Surf AI)
+      OrganizationalUnitIds:
+        default: Organization root ID or OU IDs to cover
+      ExcludedAccountIds:
+        default: Account IDs to exclude (optional)
+      AlreadyConnectedAccountIds:
+        default: Account IDs already connected individually (optional)
+      CallAs:
+        default: Deploying as management account or delegated admin?
+      CreateManagementAccountRole:
+        default: Also create the role in this account?
+      EnableS3RequestMetrics:
+        default: Enable S3 request metrics on existing buckets?
+      AutoEnableNewBuckets:
+        default: Keep enabling request metrics on future buckets too?
+
+Parameters:
+  ExternalId:
+    Type: String
+    Description: Unique External ID provided by Surf AI for this organization.
+    NoEcho: true
+    MinLength: 20
+    MaxLength: 1224
+    AllowedPattern: "^[\\w+=,.@:/-]+$"
+  OrganizationalUnitIds:
+    Type: CommaDelimitedList
+    Description: >-
+      The organization Root ID (r-xxxx, found in AWS Organizations > AWS
+      accounts) to cover every account in the organization, or a
+      comma-separated list of OU IDs (ou-xxxx-xxxxxxxx) to cover only
+      specific parts of it.
+  ExcludedAccountIds:
+    Type: CommaDelimitedList
+    Description: >-
+      Optional. Comma-separated list of 12-digit account IDs that must NOT
+      receive the Surf AI integration role, even though they are inside the
+      covered root/OUs above. Excluded accounts also stay excluded when the
+      automatic deployment covers accounts added to the organization later.
+      Leave empty to cover every account.
+    Default: ""
+  AlreadyConnectedAccountIds:
+    Type: CommaDelimitedList
+    Description: >-
+      Optional. Comma-separated list of 12-digit account IDs already
+      connected to Surf AI individually (for example via the single-account
+      template) before deploying this stack. Unlike ExcludedAccountIds
+      above, these accounts still receive Surf AI access - their existing
+      role is left untouched and verified instead of being recreated. Leave
+      empty if none.
+    Default: ""
+  CallAs:
+    Type: String
+    Description: >-
+      Choose SELF when deploying this stack in the organization's management
+      account (the default). Choose DELEGATED_ADMIN when deploying from an
+      account registered as a delegated administrator for CloudFormation
+      StackSets - in that case this stack does not create a role in the
+      delegated administrator account itself; see
+      CreateManagementAccountRole below.
+    Default: "SELF"
+    AllowedValues: ["SELF", "DELEGATED_ADMIN"]
+  CreateManagementAccountRole:
+    Type: String
+    Description: >-
+      Service-managed StackSets never deploy into the management account
+      itself, so this stack creates the integration role here directly -
+      only when deploying with CallAs=SELF; it has no effect under
+      DELEGATED_ADMIN. Surf AI uses this role to discover the organization's
+      member accounts (and to read this account like any other). Set to
+      "false" to skip it, for example if this account was already connected
+      to Surf AI individually before deploying this stack. When skipped, you
+      must provide Surf AI with the list of account IDs (and this account's
+      role, if applicable) yourself, and keep it up to date.
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  EnableS3RequestMetrics:
+    Type: String
+    Description: >-
+      Optional, applied in every member account. Set to "true" to enable S3
+      request metrics (filter name "EntireBucket") on all S3 buckets,
+      allowing Surf AI to analyze S3 request activity. Buckets that already
+      have an "EntireBucket" filter are left untouched. S3 request metrics
+      may incur additional CloudWatch costs (roughly $5/month per bucket
+      that receives requests - see README).
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  AutoEnableNewBuckets:
+    Type: String
+    Description: >-
+      Only applies when the previous option is "true"; otherwise ignored.
+      Keeps S3 request metrics enabled on buckets created in the future, by
+      installing a small maintenance task in each member account (a Lambda
+      function triggered once per day) that enables the "EntireBucket"
+      filter on any bucket that does not have one yet.
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+Conditions:
+  ManagementRoleEnabled: !And
+    - !Equals [!Ref CreateManagementAccountRole, "true"]
+    - !Equals [!Ref CallAs, "SELF"]
+  HasExcludedAccounts: !Not [!Equals [!Join [",", !Ref ExcludedAccountIds], ""]]
+  HasAlreadyConnectedAccounts: !Not [!Equals [!Join [",", !Ref AlreadyConnectedAccountIds], ""]]
+  HasBothExclusionLists: !And
+    - !Condition HasExcludedAccounts
+    - !Condition HasAlreadyConnectedAccounts
+  HasEitherExclusionList: !Or
+    - !Condition HasExcludedAccounts
+    - !Condition HasAlreadyConnectedAccounts
+
+Resources:
+  ManagementAccountIntegrationRole:
+    Type: AWS::IAM::Role
+    Condition: ManagementRoleEnabled
+    Properties:
+      RoleName: surfai-integration-role
+      Description: Role assumed by Surf AI for security analysis and to discover the organization's accounts. Access is limited to the read-only actions enumerated in the SurfAiIntegrationReadOnly policy below.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowSurfAIAssumeRole
+            Effect: Allow
+            Principal:
+              AWS: "arn:aws:iam::861276082564:root"
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                "sts:ExternalId": !Ref ExternalId
+              ArnEquals:
+                "aws:PrincipalArn": "arn:aws:iam::861276082564:role/surfai/integration/surfai-customer-integration"
+          - Sid: AllowSurfAITagSession
+            Effect: Allow
+            Principal:
+              AWS: "arn:aws:iam::861276082564:root"
+            Action: "sts:TagSession"
+            Condition:
+              ArnEquals:
+                "aws:PrincipalArn": "arn:aws:iam::861276082564:role/surfai/integration/surfai-customer-integration"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/SecurityAudit"
+      Policies:
+        - PolicyName: SurfAiIntegrationReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudTrailReadOnly
+                Effect: Allow
+                Action: "cloudtrail:LookupEvents"
+                Resource: "*"
+              - Sid: CloudWatchMetricsReadOnly
+                Effect: Allow
+                Action: "cloudwatch:GetMetricData"
+                Resource: "*"
+              - Sid: EC2ReadOnly
+                Effect: Allow
+                Action:
+                  - "ec2:DescribeInstances"
+                  - "ec2:DescribeClientVpnEndpoints"
+                Resource: "*"
+              - Sid: IAMReadOnly
+                Effect: Allow
+                Action:
+                  - "iam:ListGroups"
+                  - "iam:ListPolicies"
+                  - "iam:GetPolicy"
+                  - "iam:ListAttachedRolePolicies"
+                  - "iam:ListRoles"
+                  - "iam:ListUsers"
+                Resource: "*"
+              - Sid: ACMReadOnly
+                Effect: Allow
+                Action:
+                  - "acm:ListCertificates"
+                  - "acm:DescribeCertificate"
+                  - "acm:ListTagsForCertificate"
+                Resource: "*"
+              - Sid: ResourceGroupsTaggingReadOnly
+                Effect: Allow
+                Action: "tag:GetResources"
+                Resource: "*"
+              - Sid: ResourceGroupsReadOnly
+                Effect: Allow
+                Action: "resource-groups:ListGroups"
+                Resource: "*"
+              - Sid: IdentityStoreReadOnly
+                Effect: Allow
+                Action:
+                  - "identitystore:ListGroups"
+                  - "identitystore:ListGroupMemberships"
+                  - "identitystore:ListUsers"
+                Resource: "*"
+              - Sid: SSOAdminReadOnly
+                Effect: Allow
+                Action: "sso:ListInstances"
+                Resource: "*"
+      Tags:
+        - Key: ManagedBy
+          Value: surfai-integration
+        - Key: Purpose
+          Value: surf-ai-readonly-access
+
+  MemberAccountsStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Properties:
+      StackSetName: surfai-integration-role
+      Description: Creates the role in every account not already connected individually.
+      PermissionModel: SERVICE_MANAGED
+      CallAs: !Ref CallAs
+      Capabilities:
+        - CAPABILITY_NAMED_IAM
+      AutoDeployment:
+        Enabled: true
+        RetainStacksOnAccountRemoval: false
+      OperationPreferences:
+        MaxConcurrentPercentage: 25
+        FailureTolerancePercentage: 100
+      Parameters:
+        - ParameterKey: ExternalId
+          ParameterValue: !Ref ExternalId
+        - ParameterKey: IfRoleAlreadyExists
+          ParameterValue: "fail"
+        - ParameterKey: EnableS3RequestMetrics
+          ParameterValue: !Ref EnableS3RequestMetrics
+        - ParameterKey: AutoEnableNewBuckets
+          ParameterValue: !Ref AutoEnableNewBuckets
+      StackInstancesGroup:
+        - DeploymentTargets:
+            OrganizationalUnitIds: !Ref OrganizationalUnitIds
+            AccountFilterType: !If [HasEitherExclusionList, "DIFFERENCE", !Ref "AWS::NoValue"]
+            Accounts: !If
+              - HasEitherExclusionList
+              - !If
+                - HasBothExclusionLists
+                - !Split
+                  - ","
+                  - !Join
+                    - ","
+                    - - !Join [",", !Ref ExcludedAccountIds]
+                      - !Join [",", !Ref AlreadyConnectedAccountIds]
+                - !If [HasExcludedAccounts, !Ref ExcludedAccountIds, !Ref AlreadyConnectedAccountIds]
+              - !Ref "AWS::NoValue"
+          Regions:
+            - !Ref AWS::Region
+      Tags:
+        - Key: ManagedBy
+          Value: surfai-integration
+      TemplateURL: https://surfai-integration-templates.s3.amazonaws.com/poc/v2/surfai-integration-role.yaml
+
+  AdoptedAccountsStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Condition: HasAlreadyConnectedAccounts
+    Properties:
+      StackSetName: surfai-integration-role-adopted-accounts
+      Description: Adopts and verifies the role in accounts already connected individually. Not auto-deployed - new accounts get a fresh role via MemberAccountsStackSet instead.
+      PermissionModel: SERVICE_MANAGED
+      CallAs: !Ref CallAs
+      Capabilities:
+        - CAPABILITY_NAMED_IAM
+      # Required by CreateStackSet whenever PermissionModel is SERVICE_MANAGED, and
+      # deliberately disabled: an account added to the organization later has no
+      # pre-existing role to adopt, so it must get a fresh one from
+      # MemberAccountsStackSet rather than be swept in here. RetainStacksOnAccountRemoval
+      # is omitted because AWS accepts it only when Enabled is true.
+      AutoDeployment:
+        Enabled: false
+      OperationPreferences:
+        MaxConcurrentPercentage: 25
+        FailureTolerancePercentage: 100
+      Parameters:
+        - ParameterKey: ExternalId
+          ParameterValue: !Ref ExternalId
+        - ParameterKey: IfRoleAlreadyExists
+          ParameterValue: "use-existing"
+        - ParameterKey: EnableS3RequestMetrics
+          ParameterValue: !Ref EnableS3RequestMetrics
+        - ParameterKey: AutoEnableNewBuckets
+          ParameterValue: !Ref AutoEnableNewBuckets
+      StackInstancesGroup:
+        - DeploymentTargets:
+            OrganizationalUnitIds: !Ref OrganizationalUnitIds
+            AccountFilterType: INTERSECTION
+            Accounts: !Ref AlreadyConnectedAccountIds
+          Regions:
+            - !Ref AWS::Region
+      Tags:
+        - Key: ManagedBy
+          Value: surfai-integration
+      TemplateURL: https://surfai-integration-templates.s3.amazonaws.com/poc/v2/surfai-integration-role.yaml
+
+Outputs:
+  ManagementRoleArn:
+    Condition: ManagementRoleEnabled
+    Description: ARN of the role in the management account. Provide this to your Surf AI representative.
+    Value: !GetAtt ManagementAccountIntegrationRole.Arn
+  AccountRegion:
+    Description: Region of this stack. Provide this to your Surf AI representative.
+    Value: !Ref AWS::Region
+  StackSetId:
+    Description: Track rollout under CloudFormation > StackSets > surfai-integration-role > Stack instances.
+    Value: !Ref MemberAccountsStackSet
+  AdoptedAccountsStackSetId:
+    Condition: HasAlreadyConnectedAccounts
+    Description: Track rollout under CloudFormation > StackSets > surfai-integration-role-adopted-accounts > Stack instances.
+    Value: !Ref AdoptedAccountsStackSet

@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'v1/**'
+      - 'poc/**'
   workflow_dispatch: {}
 
 concurrency:
@@ -17,7 +18,7 @@ permissions:
 
 jobs:
   publish:
-    name: Publish v1 templates
+    name: Publish templates
     runs-on: ubuntu-latest
     # workflow_dispatch has no branches: filter (unlike push) — guard explicitly so a manual run against any other ref fails fast instead of relying solely on the OIDC trust's ref check.
     if: github.ref == 'refs/heads/main'
@@ -38,7 +39,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          aws s3 sync v1/ s3://surfai-integration-templates/v1/ \
-            --content-type "application/x-yaml" \
-            --exclude "*" --include "*.yaml"
-          echo "Published s3://surfai-integration-templates/v1/" >> "$GITHUB_STEP_SUMMARY"
+          for dir in v1 poc/v1 poc/v2; do
+            aws s3 sync "$dir/" "s3://surfai-integration-templates/$dir/" \
+              --content-type "application/x-yaml" \
+              --exclude "*" --include "*.yaml"
+            echo "Published s3://surfai-integration-templates/$dir/" >> "$GITHUB_STEP_SUMMARY"
+          done

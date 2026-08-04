@@ -14,7 +14,6 @@ Metadata:
         Parameters:
           - ExternalId
           - IfRoleAlreadyExists
-          - ManagedPolicyArns
       - Label:
           default: S3 request activity analysis (optional)
         Parameters:
@@ -25,8 +24,6 @@ Metadata:
         default: External ID (provided by Surf AI)
       IfRoleAlreadyExists:
         default: If the role "surfai-integration-role" already exists in this account
-      ManagedPolicyArns:
-        default: IAM managed policies to attach to the role (comma-separated ARNs)
       EnableS3RequestMetrics:
         default: Enable S3 request metrics on existing buckets?
       AutoEnableNewBuckets:
@@ -40,20 +37,6 @@ Parameters:
     MinLength: 20
     MaxLength: 1224
     AllowedPattern: "^[\\w+=,.@:/-]+$"
-  ManagedPolicyArns:
-    Type: CommaDelimitedList
-    Description: >-
-      Comma-separated list of IAM managed policy ARNs to attach to the role.
-      Defaults to the policies Surf AI's product features currently rely on
-      (see README for what each one grants). Narrowing this list can
-      silently break ingestion or actions that need a policy you removed;
-      widening it grants Surf AI's role additional read access. In
-      "use-existing" mode, the pre-existing role's attached policies must
-      match this list exactly. Changing this parameter on an already-deployed
-      stack updates the role's attached policies to match on the next
-      update.
-    Default: "arn:aws:iam::aws:policy/SecurityAudit,arn:aws:iam::aws:policy/ReadOnlyAccess,arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess,arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess"
-    AllowedPattern: "^arn:aws:iam::(aws|[0-9]{12}):policy/[\\w+=,.@-]+$"
   IfRoleAlreadyExists:
     Type: String
     Description: >-
@@ -103,7 +86,7 @@ Resources:
     Condition: CreateRole
     Properties:
       RoleName: surfai-integration-role
-      Description: Role assumed by Surf AI for security analysis and product features. Access is scoped by the managed policies below (see the ManagedPolicyArns parameter).
+      Description: Role assumed by Surf AI for security analysis and product features. Access is limited to the read-only actions enumerated in the SurfAiIntegrationReadOnly policy below.
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -127,7 +110,63 @@ Resources:
             Condition:
               ArnEquals:
                 "aws:PrincipalArn": "arn:aws:iam::861276082564:role/surfai/integration/surfai-customer-integration"
-      ManagedPolicyArns: !Ref ManagedPolicyArns
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/SecurityAudit"
+      Policies:
+        - PolicyName: SurfAiIntegrationReadOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudTrailReadOnly
+                Effect: Allow
+                Action: "cloudtrail:LookupEvents"
+                Resource: "*"
+              - Sid: CloudWatchMetricsReadOnly
+                Effect: Allow
+                Action: "cloudwatch:GetMetricData"
+                Resource: "*"
+              - Sid: EC2ReadOnly
+                Effect: Allow
+                Action:
+                  - "ec2:DescribeInstances"
+                  - "ec2:DescribeClientVpnEndpoints"
+                Resource: "*"
+              - Sid: IAMReadOnly
+                Effect: Allow
+                Action:
+                  - "iam:ListGroups"
+                  - "iam:ListPolicies"
+                  - "iam:GetPolicy"
+                  - "iam:ListAttachedRolePolicies"
+                  - "iam:ListRoles"
+                  - "iam:ListUsers"
+                Resource: "*"
+              - Sid: ACMReadOnly
+                Effect: Allow
+                Action:
+                  - "acm:ListCertificates"
+                  - "acm:DescribeCertificate"
+                  - "acm:ListTagsForCertificate"
+                Resource: "*"
+              - Sid: ResourceGroupsTaggingReadOnly
+                Effect: Allow
+                Action: "tag:GetResources"
+                Resource: "*"
+              - Sid: ResourceGroupsReadOnly
+                Effect: Allow
+                Action: "resource-groups:ListGroups"
+                Resource: "*"
+              - Sid: IdentityStoreReadOnly
+                Effect: Allow
+                Action:
+                  - "identitystore:ListGroups"
+                  - "identitystore:ListGroupMemberships"
+                  - "identitystore:ListUsers"
+                Resource: "*"
+              - Sid: SSOAdminReadOnly
+                Effect: Allow
+                Action: "sso:ListInstances"
+                Resource: "*"
       Tags:
         - Key: ManagedBy
           Value: surfai-integration
@@ -156,6 +195,7 @@ Resources:
                   - "iam:GetRole"
                   - "iam:ListAttachedRolePolicies"
                   - "iam:ListRolePolicies"
+                  - "iam:GetRolePolicy"
                 Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/surfai-integration-role"
               - Effect: Allow
                 Action:
@@ -216,6 +256,60 @@ Resources:
                   return [principal]
               return None
 
+          def action_map(doc):
+              out = {}
+              stmts = doc.get("Statement", [])
+              if isinstance(stmts, dict):
+                  stmts = [stmts]
+              for st in stmts:
+                  acts = st.get("Action", [])
+                  acts = acts if isinstance(acts, list) else [acts]
+                  for a in acts:
+                      if isinstance(a, str):
+                          out[a.lower()] = a
+              return out
+
+          def granted_actions(doc, label, problems):
+              actions = set()
+              stmts = doc.get("Statement", [])
+              if isinstance(stmts, dict):
+                  stmts = [stmts]
+              for st in stmts:
+                  if not isinstance(st, dict):
+                      problems.append(f"{label} contains a malformed statement")
+                      return None
+                  if "NotAction" in st or "NotResource" in st:
+                      problems.append(f"{label} uses NotAction or NotResource, which Surf AI's check cannot evaluate - "
+                                      "rewrite it with an explicit Action list")
+                      return None
+                  if st.get("Effect") == "Deny":
+                      problems.append(f"{label} contains a Deny statement, which can remove access Surf AI needs "
+                                      "without this check being able to tell - remove it")
+                      return None
+                  if st.get("Effect") != "Allow":
+                      problems.append(f"{label} contains a statement whose Effect is neither Allow nor Deny")
+                      return None
+                  if st.get("Resource") != "*":
+                      problems.append(f"{label} has an Allow statement scoped to a Resource other than \"*\", "
+                                      "so the actions it appears to grant may not be usable")
+                      return None
+                  if st.get("Condition"):
+                      problems.append(f"{label} has an Allow statement carrying a Condition, "
+                                      "so the actions it appears to grant may never be usable")
+                      return None
+                  acts = st.get("Action", [])
+                  acts = acts if isinstance(acts, list) else [acts]
+                  for a in acts:
+                      if not isinstance(a, str):
+                          problems.append(f"{label} contains a non-string Action entry")
+                          return None
+                      if "*" in a or "?" in a:
+                          problems.append(f"{label} grants \"{a}\", a wildcard. Surf AI's role must list actions "
+                                          "explicitly so its permissions are exactly what the template documents")
+                          return None
+                      actions.add(a.lower())
+              return actions
+
           def send(event, status, reason):
               body = json.dumps({
                   "Status": status,
@@ -247,7 +341,8 @@ Resources:
                       send(event, "SUCCESS", "no-op")
                       return
                   expected_eid = event["ResourceProperties"]["ExternalId"]
-                  required_policy_arns = set(event["ResourceProperties"]["RequiredPolicyArns"])
+                  required_display = action_map(event["ResourceProperties"]["RequiredPolicyDocument"])
+                  required_actions = set(required_display)
                   iam = boto3.client("iam")
                   try:
                       role = iam.get_role(RoleName=ROLE)["Role"]
@@ -308,34 +403,50 @@ Resources:
                   if not tag_ok:
                       problems.extend(tag_problems or
                           ["trust policy does not allow sts:TagSession for Surf AI"])
-                  if role.get("PermissionsBoundary"):
-                      problems.append("role has a permissions boundary attached, which can silently remove access "
-                          "Surf AI needs - remove it, or let this stack create the role instead")
+                  required_managed = event["ResourceProperties"]["RequiredManagedPolicyArns"]
+                  required_managed = set(required_managed if isinstance(required_managed, list) else [required_managed])
                   attached = []
                   for page in iam.get_paginator("list_attached_role_policies").paginate(RoleName=ROLE):
                       attached.extend(page["AttachedPolicies"])
                   attached_arns = {p["PolicyArn"] for p in attached}
-                  missing = required_policy_arns - attached_arns
-                  if missing:
-                      problems.append("missing required managed policies: " +
-                          ", ".join(sorted(a.rsplit("/", 1)[-1] for a in missing)))
-                  extra = [p for p in attached if p["PolicyArn"] not in required_policy_arns]
+                  missing_managed = required_managed - attached_arns
+                  if missing_managed:
+                      problems.append("missing required managed polic" +
+                          ("y" if len(missing_managed) == 1 else "ies") + ": " +
+                          ", ".join(sorted(missing_managed)))
+                  extra = [p for p in attached if p["PolicyArn"] not in required_managed]
                   if extra:
-                      # Matched by ARN, not name - a policy merely named like a required one is flagged.
                       extra_desc = sorted(f'{p["PolicyName"]} ({p["PolicyArn"]})' for p in extra)
                       print(f"role {ROLE} has unexpected extra managed policies: {extra_desc}")
                       problems.append("unexpected extra managed polic" +
                           ("y" if len(extra) == 1 else "ies") + " attached: " +
-                          ", ".join(extra_desc))
-                  inline = []
-                  for page in iam.get_paginator("list_role_policies").paginate(RoleName=ROLE):
-                      inline.extend(page["PolicyNames"])
-                  if inline:
-                      print(f"role {ROLE} has unexpected inline policies: {sorted(inline)}")
-                      problems.append("unexpected inline polic" +
-                          ("y" if len(inline) == 1 else "ies") +
-                          " attached: " + ", ".join(sorted(inline)) +
-                          " - remove inline policies, only the required managed policies are expected")
+                          ", ".join(extra_desc) + " - detach these and redeploy")
+                  if role.get("PermissionsBoundary"):
+                      problems.append("role has a permissions boundary attached, which can silently remove access "
+                          "Surf AI needs - remove it, or let this stack create the role instead")
+                  granted, unbounded = set(), False
+                  inline_paginator = iam.get_paginator("list_role_policies")
+                  for page in inline_paginator.paginate(RoleName=ROLE):
+                      for inline_name in page["PolicyNames"]:
+                          acts = granted_actions(
+                              iam.get_role_policy(RoleName=ROLE, PolicyName=inline_name)["PolicyDocument"],
+                              f"inline policy {inline_name}", problems)
+                          if acts is None:
+                              unbounded = True
+                          else:
+                              granted |= acts
+                  if not unbounded:
+                      missing_actions = sorted(required_display[a] for a in required_actions - granted)
+                      if missing_actions:
+                          print(f"role {ROLE} is missing required actions: {missing_actions}")
+                          problems.append("role does not grant the read-only actions Surf AI requires: " +
+                              ", ".join(missing_actions))
+                      extra_actions = sorted(granted - required_actions)
+                      if extra_actions:
+                          print(f"role {ROLE} grants actions beyond what Surf AI requires: {extra_actions}")
+                          problems.append("role grants action" + ("" if len(extra_actions) == 1 else "s") +
+                              " beyond what Surf AI requires: " + ", ".join(extra_actions) +
+                              " - Surf AI's role must grant exactly the documented actions and nothing else")
                   if problems:
                       send(event, "FAILED", f"existing role {ROLE} is not valid: " + "; ".join(problems))
                   else:
@@ -355,7 +466,61 @@ Resources:
     Properties:
       ServiceToken: !GetAtt ExistingRoleValidationFunction.Arn
       ExternalId: !Ref ExternalId
-      RequiredPolicyArns: !Ref ManagedPolicyArns
+      RequiredManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/SecurityAudit"
+      RequiredPolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CloudTrailReadOnly
+            Effect: Allow
+            Action: "cloudtrail:LookupEvents"
+            Resource: "*"
+          - Sid: CloudWatchMetricsReadOnly
+            Effect: Allow
+            Action: "cloudwatch:GetMetricData"
+            Resource: "*"
+          - Sid: EC2ReadOnly
+            Effect: Allow
+            Action:
+              - "ec2:DescribeInstances"
+              - "ec2:DescribeClientVpnEndpoints"
+            Resource: "*"
+          - Sid: IAMReadOnly
+            Effect: Allow
+            Action:
+              - "iam:ListGroups"
+              - "iam:ListPolicies"
+              - "iam:GetPolicy"
+              - "iam:ListAttachedRolePolicies"
+              - "iam:ListRoles"
+              - "iam:ListUsers"
+            Resource: "*"
+          - Sid: ACMReadOnly
+            Effect: Allow
+            Action:
+              - "acm:ListCertificates"
+              - "acm:DescribeCertificate"
+              - "acm:ListTagsForCertificate"
+            Resource: "*"
+          - Sid: ResourceGroupsTaggingReadOnly
+            Effect: Allow
+            Action: "tag:GetResources"
+            Resource: "*"
+          - Sid: ResourceGroupsReadOnly
+            Effect: Allow
+            Action: "resource-groups:ListGroups"
+            Resource: "*"
+          - Sid: IdentityStoreReadOnly
+            Effect: Allow
+            Action:
+              - "identitystore:ListGroups"
+              - "identitystore:ListGroupMemberships"
+              - "identitystore:ListUsers"
+            Resource: "*"
+          - Sid: SSOAdminReadOnly
+            Effect: Allow
+            Action: "sso:ListInstances"
+            Resource: "*"
 
   S3RequestMetricsFunctionRole:
     Type: AWS::IAM::Role

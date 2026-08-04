@@ -1,0 +1,541 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  (v1, rev 2026-08-03) Creates the cross-account IAM role assumed by Surf AI
+  for read-only visibility into this AWS account, and optionally enables S3
+  request metrics on S3 buckets. See
+  https://github.com/surfai-engineering/aws-integration-templates/blob/main/CHANGELOG.md
+  for what this revision includes.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Surf AI connection
+        Parameters:
+          - ExternalId
+          - IfRoleAlreadyExists
+      - Label:
+          default: S3 request activity analysis (optional)
+        Parameters:
+          - EnableS3RequestMetrics
+          - AutoEnableNewBuckets
+    ParameterLabels:
+      ExternalId:
+        default: External ID (provided by Surf AI)
+      IfRoleAlreadyExists:
+        default: If the role "surfai-integration-role" already exists in this account
+      EnableS3RequestMetrics:
+        default: Enable S3 request metrics on existing buckets?
+      AutoEnableNewBuckets:
+        default: Also keep enabling request metrics on buckets created in the future?
+
+Parameters:
+  ExternalId:
+    Type: String
+    Description: Unique External ID provided by Surf AI for this account.
+    NoEcho: true
+    MinLength: 20
+    MaxLength: 1224
+    AllowedPattern: "^[\\w+=,.@:/-]+$"
+  IfRoleAlreadyExists:
+    Type: String
+    Description: >-
+      Leave "fail" (default) to create the role; stack creation fails if a
+      role named "surfai-integration-role" already exists. Choose
+      "use-existing" if the role was already created (for example via the
+      manual setup): the stack will not modify it, and will instead verify
+      that its trust policy and permissions match what Surf AI requires,
+      failing with a detailed reason if not. To replace a misconfigured
+      existing role, delete it in the IAM console and deploy with "fail".
+    Default: "fail"
+    AllowedValues: ["fail", "use-existing"]
+  EnableS3RequestMetrics:
+    Type: String
+    Description: >-
+      Optional. Set to "true" to enable S3 request metrics (filter name
+      "EntireBucket") on all S3 buckets that currently exist in this account,
+      allowing Surf AI to analyze S3 request activity. Buckets that already
+      have an "EntireBucket" filter are left untouched. S3 request metrics
+      may incur additional CloudWatch costs (roughly $5/month per bucket
+      that receives requests - see README).
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  AutoEnableNewBuckets:
+    Type: String
+    Description: >-
+      Only applies when the previous option is "true"; otherwise ignored.
+      Keeps S3 request metrics enabled on buckets created in the future, by
+      installing a small maintenance task in this account (a Lambda function
+      triggered once per day) that enables the "EntireBucket" filter on any
+      bucket that does not have one yet. Set to "false" to enable metrics
+      only once, on the buckets that exist today.
+    Default: "true"
+    AllowedValues: ["true", "false"]
+
+Conditions:
+  CreateRole: !Equals [!Ref IfRoleAlreadyExists, "fail"]
+  UseExistingRole: !Equals [!Ref IfRoleAlreadyExists, "use-existing"]
+  S3RequestMetricsEnabled: !Equals [!Ref EnableS3RequestMetrics, "true"]
+  DailySweepEnabled: !And
+    - !Condition S3RequestMetricsEnabled
+    - !Equals [!Ref AutoEnableNewBuckets, "true"]
+
+Resources:
+  SurfAiIntegrationRole:
+    Type: AWS::IAM::Role
+    Condition: CreateRole
+    Properties:
+      RoleName: surfai-integration-role
+      Description: Read-only role assumed by Surf AI to read this account's configuration, metadata, and resource data (including S3 object, DynamoDB item, and CloudWatch Logs content) for security analysis and product features.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Principal is account root, scoped via aws:PrincipalArn below, not a role ARN - see README for why.
+          - Sid: AllowSurfAIAssumeRole
+            Effect: Allow
+            Principal:
+              AWS: "arn:aws:iam::861276082564:root"
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                "sts:ExternalId": !Ref ExternalId
+              ArnEquals:
+                "aws:PrincipalArn": "arn:aws:iam::861276082564:role/surfai/integration/surfai-customer-integration"
+          - Sid: AllowSurfAITagSession
+            Effect: Allow
+            Principal:
+              AWS: "arn:aws:iam::861276082564:root"
+            Action: "sts:TagSession"
+            Condition:
+              ArnEquals:
+                "aws:PrincipalArn": "arn:aws:iam::861276082564:role/surfai/integration/surfai-customer-integration"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/SecurityAudit
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess
+      Tags:
+        - Key: ManagedBy
+          Value: surfai-integration
+        - Key: Purpose
+          Value: surf-ai-readonly-access
+
+  ExistingRoleValidationFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: UseExistingRole
+    Properties:
+      Description: Read-only execution role for the Lambda that validates the existing integration role.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: ValidateIntegrationRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "iam:GetRole"
+                  - "iam:ListAttachedRolePolicies"
+                  - "iam:ListRolePolicies"
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/surfai-integration-role"
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "arn:aws:logs:*:*:*"
+      Tags:
+        - Key: ManagedBy
+          Value: surfai-integration
+
+  ExistingRoleValidationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: UseExistingRole
+    Properties:
+      # Custom name: the Lambda-default has no retention and fails "already exists" on redeploy.
+      LogGroupName: !Sub "/surfai/integration/${AWS::StackName}-role-validation"
+      RetentionInDays: 30
+
+  ExistingRoleValidationFunction:
+    Type: AWS::Lambda::Function
+    Condition: UseExistingRole
+    Properties:
+      Description: Verifies the pre-existing surfai-integration-role matches Surf AI requirements. Read-only.
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 128
+      Role: !GetAtt ExistingRoleValidationFunctionRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref ExistingRoleValidationLogGroup
+      Code:
+        ZipFile: |
+          import boto3, json, time, urllib.request
+
+          class ResponseDeliveryError(Exception):
+              """Delivery failure, not a validation result - must not be caught as generic Exception."""
+
+          ROLE = "surfai-integration-role"
+          # Accepts the bridge role's ARN (older shape) or account root (current shape).
+          TRUSTED_PRINCIPALS = {
+              "arn:aws:iam::861276082564:role/surfai/integration/surfai-customer-integration",
+              "arn:aws:iam::861276082564:root",
+          }
+          TRUSTED_ACTIONS = {"sts:AssumeRole", "sts:TagSession"}
+          REQUIRED_POLICY_ARNS = {
+              "arn:aws:iam::aws:policy/SecurityAudit",
+              "arn:aws:iam::aws:policy/ReadOnlyAccess",
+              "arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess",
+              "arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess",
+          }
+
+          def statement_principals(st):
+              # Returns principal strings, or None for any shape we don't recognize.
+              principal = st.get("Principal", {})
+              if isinstance(principal, dict):
+                  if set(principal) - {"AWS"}:
+                      return None
+                  pr = principal.get("AWS")
+                  if pr is None:
+                      return None
+                  return pr if isinstance(pr, list) else [pr]
+              if isinstance(principal, str):
+                  return [principal]
+              return None
+
+          def send(event, status, reason):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason[:3800],
+                  "PhysicalResourceId": "surfai-existing-role-validation",
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+              }).encode()
+              last_error = None
+              for attempt in range(3):
+                  try:
+                      req = urllib.request.Request(
+                          event["ResponseURL"], data=body, method="PUT",
+                          headers={"Content-Type": ""})
+                      urllib.request.urlopen(req, timeout=3)
+                      return
+                  except Exception as e:
+                      last_error = e
+                      if attempt < 2:
+                          time.sleep(2 ** attempt)
+              # Distinguishable type so it isn't mistaken for a real FAILED validation result.
+              print(f"failed to deliver CloudFormation response after 3 attempts: {last_error}")
+              raise ResponseDeliveryError(last_error)
+
+          def handler(event, context):
+              try:
+                  if event["RequestType"] == "Delete":
+                      send(event, "SUCCESS", "no-op")
+                      return
+                  expected_eid = event["ResourceProperties"]["ExternalId"]
+                  iam = boto3.client("iam")
+                  try:
+                      role = iam.get_role(RoleName=ROLE)["Role"]
+                  except iam.exceptions.NoSuchEntityException:
+                      send(event, "FAILED",
+                           f"role {ROLE} does not exist in this account - "
+                           "redeploy with 'If the role already exists' set to 'fail' to create it")
+                      return
+                  problems, assume_ok, tag_ok = [], False, False
+                  eid_problems, tag_problems = [], []
+                  stmts = role["AssumeRolePolicyDocument"].get("Statement", [])
+                  if isinstance(stmts, dict):
+                      stmts = [stmts]
+                  for st in stmts:
+                      if not isinstance(st, dict) or st.get("Effect") != "Allow":
+                          problems.append(f"unexpected non-Allow or malformed trust statement: {json.dumps(st)[:300]}")
+                          continue
+                      principals = statement_principals(st)
+                      if principals is None:
+                          problems.append(
+                              "unrecognized trust statement shape (Principal is not an "
+                              f"AWS account/role): {json.dumps(st)[:300]}")
+                          continue
+                      acts = st.get("Action", [])
+                      acts = acts if isinstance(acts, list) else [acts]
+                      unexpected_principals = [p for p in principals if p not in TRUSTED_PRINCIPALS]
+                      if unexpected_principals:
+                          problems.append(
+                              "unexpected trust statement grants access to a principal "
+                              "other than Surf AI: " + ", ".join(unexpected_principals))
+                          continue
+                      unexpected_actions = [a for a in acts if a not in TRUSTED_ACTIONS]
+                      if unexpected_actions:
+                          problems.append(
+                              "unexpected action(s) granted to Surf AI beyond "
+                              "sts:AssumeRole/sts:TagSession: " + ", ".join(unexpected_actions))
+                      trusted = bool(principals) and not unexpected_principals
+                      if trusted and "sts:AssumeRole" in acts:
+                          eid = st.get("Condition", {}).get("StringEquals", {}).get("sts:ExternalId")
+                          if eid == expected_eid:
+                              assume_ok = True
+                          elif eid is None:
+                              eid_problems.append("the sts:AssumeRole statement has no sts:ExternalId condition")
+                          else:
+                              eid_problems.append("the External ID in the trust policy does not match the one provided")
+                      if trusted and "sts:TagSession" in acts:
+                          cond = st.get("Condition", {}) or {}
+                          if any("sts:ExternalId" in (ops or {}) for ops in cond.values()):
+                              tag_problems.append(
+                                  "the sts:TagSession statement has an sts:ExternalId condition - "
+                                  "sts:TagSession does not support that key, so the condition never "
+                                  "matches and Surf AI's tagged AssumeRole calls are denied")
+                          else:
+                              tag_ok = True
+                  if not assume_ok:
+                      problems.extend(eid_problems or
+                          ["trust policy does not allow sts:AssumeRole for Surf AI"])
+                  if not tag_ok:
+                      problems.extend(tag_problems or
+                          ["trust policy does not allow sts:TagSession for Surf AI"])
+                  attached = iam.list_attached_role_policies(RoleName=ROLE)["AttachedPolicies"]
+                  attached_arns = {p["PolicyArn"] for p in attached}
+                  missing = REQUIRED_POLICY_ARNS - attached_arns
+                  if missing:
+                      problems.append("missing required managed policies: " +
+                          ", ".join(sorted(a.rsplit("/", 1)[-1] for a in missing)))
+                  extra = [p for p in attached if p["PolicyArn"] not in REQUIRED_POLICY_ARNS]
+                  if extra:
+                      # Matched by ARN, not name - a policy merely named like a required one is flagged.
+                      extra_desc = sorted(f'{p["PolicyName"]} ({p["PolicyArn"]})' for p in extra)
+                      print(f"role {ROLE} has unexpected extra managed policies: {extra_desc}")
+                      problems.append("unexpected extra managed polic" +
+                          ("y" if len(extra) == 1 else "ies") + " attached: " +
+                          ", ".join(extra_desc))
+                  inline = iam.list_role_policies(RoleName=ROLE)["PolicyNames"]
+                  if inline:
+                      print(f"role {ROLE} has unexpected inline policies: {sorted(inline)}")
+                      problems.append("unexpected inline polic" +
+                          ("y" if len(inline) == 1 else "ies") +
+                          " attached: " + ", ".join(sorted(inline)) +
+                          " - remove inline policies, only the required managed policies are expected")
+                  if problems:
+                      send(event, "FAILED", f"existing role {ROLE} is not valid: " + "; ".join(problems))
+                  else:
+                      send(event, "SUCCESS", f"existing role {ROLE} is correctly configured for Surf AI")
+              except ResponseDeliveryError:
+                  # Already retried in send() - re-raise, don't report as FAILED validation.
+                  raise
+              except Exception as e:
+                  send(event, "FAILED", str(e))
+      Tags:
+        - Key: ManagedBy
+          Value: surfai-integration
+
+  ExistingRoleValidation:
+    Type: Custom::ExistingRoleValidation
+    Condition: UseExistingRole
+    Properties:
+      ServiceToken: !GetAtt ExistingRoleValidationFunction.Arn
+      ExternalId: !Ref ExternalId
+
+  S3RequestMetricsFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: S3RequestMetricsEnabled
+    Properties:
+      Description: Execution role for the Lambda that enables S3 request metrics.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: EnableS3RequestMetrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:ListAllMyBuckets"
+                  - "s3:GetBucketLocation"
+                  - "s3:GetMetricsConfiguration"
+                  - "s3:PutMetricsConfiguration"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "arn:aws:logs:*:*:*"
+      Tags:
+        - Key: ManagedBy
+          Value: surfai-integration
+
+  S3RequestMetricsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: S3RequestMetricsEnabled
+    Properties:
+      LogGroupName: !Sub "/surfai/integration/${AWS::StackName}-s3-metrics"
+      RetentionInDays: 30
+
+  S3RequestMetricsFunction:
+    Type: AWS::Lambda::Function
+    Condition: S3RequestMetricsEnabled
+    Properties:
+      Description: Enables the EntireBucket S3 request-metrics filter on buckets that lack one.
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 900
+      MemorySize: 256
+      Role: !GetAtt S3RequestMetricsFunctionRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref S3RequestMetricsLogGroup
+      Code:
+        ZipFile: |
+          import boto3, json, time, urllib.request
+
+          class ResponseDeliveryError(Exception):
+              """Delivery failure, not a sweep result - must not be caught as generic Exception."""
+
+          def send(event, status, reason):
+              body = json.dumps({
+                  "Status": status,
+                  "Reason": reason[:3800],
+                  "PhysicalResourceId": "surfai-s3-request-metrics",
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+              }).encode()
+              last_error = None
+              for attempt in range(3):
+                  try:
+                      req = urllib.request.Request(
+                          event["ResponseURL"], data=body, method="PUT",
+                          headers={"Content-Type": ""})
+                      urllib.request.urlopen(req, timeout=3)
+                      return
+                  except Exception as e:
+                      last_error = e
+                      if attempt < 2:
+                          time.sleep(2 ** attempt)
+              # Distinguishable type - see the validator Lambda for why.
+              print(f"failed to deliver CloudFormation response after 3 attempts: {last_error}")
+              raise ResponseDeliveryError(last_error)
+
+          def sweep(context, daily_sweep_scheduled):
+              s3 = boto3.client("s3")
+              # Paginated: AWS rejects unpaginated calls above the 10,000-bucket quota.
+              names = [b["Name"] for page in s3.get_paginator("list_buckets").paginate()
+                       for b in page["Buckets"]]
+              ok, skipped, failed = 0, 0, []
+              regional_clients = {}
+              truncated = False
+              for name in names:
+                  # Reserve time to send the response before the Lambda's own timeout hits.
+                  if context.get_remaining_time_in_millis() < 20000:
+                      truncated = True
+                      break
+                  try:
+                      loc = s3.get_bucket_location(Bucket=name).get("LocationConstraint")
+                      region = {"EU": "eu-west-1", None: "us-east-1"}.get(loc, loc)
+                      rs3 = regional_clients.get(region)
+                      if rs3 is None:
+                          rs3 = regional_clients[region] = boto3.client("s3", region_name=region)
+                      try:
+                          rs3.get_bucket_metrics_configuration(Bucket=name, Id="EntireBucket")
+                          skipped += 1
+                          continue
+                      except rs3.exceptions.ClientError as e:
+                          if e.response["Error"]["Code"] != "NoSuchConfiguration":
+                              raise
+                      rs3.put_bucket_metrics_configuration(
+                          Bucket=name, Id="EntireBucket",
+                          MetricsConfiguration={"Id": "EntireBucket"})
+                      ok += 1
+                  except Exception as e:
+                      failed.append(f"{name}: {e}")
+              reason = (f"Enabled EntireBucket request metrics on {ok} bucket(s), "
+                        f"{skipped} already had it, of {len(names)} total")
+              if truncated:
+                  remaining = len(names) - ok - skipped - len(failed)
+                  reason += (f"; stopped early to leave time to respond, "
+                             f"{remaining} bucket(s) not yet checked this run")
+                  reason += (" - the daily sweep will cover them" if daily_sweep_scheduled
+                             else " - re-deploy or update this stack to continue, "
+                                  "no daily sweep is scheduled to pick them up")
+              if failed:
+                  reason += "; FAILED: " + "; ".join(failed)
+              print(reason)
+              return reason, failed
+
+          def handler(event, context):
+              is_cfn = "ResponseURL" in event
+              if is_cfn and event["RequestType"] == "Delete":
+                  send(event, "SUCCESS",
+                       "Delete is a no-op; request-metrics filters are left in place")
+                  return
+              # EventBridge invocation has no ResourceProperties; being invoked at all implies scheduled.
+              daily_sweep_scheduled = event.get("ResourceProperties", {}).get(
+                  "DailySweepScheduled", "true") == "true"
+              try:
+                  reason, failed = sweep(context, daily_sweep_scheduled)
+                  if is_cfn:
+                      # Per-bucket failures don't fail the resource - that would delete the role over one bad bucket.
+                      send(event, "SUCCESS", reason)
+              except ResponseDeliveryError:
+                  # Already retried in send() - re-raise, don't report the sweep as FAILED.
+                  raise
+              except Exception as e:
+                  if is_cfn:
+                      send(event, "FAILED", str(e))
+                  else:
+                      raise
+      Tags:
+        - Key: ManagedBy
+          Value: surfai-integration
+
+  S3RequestMetricsSetup:
+    Type: Custom::S3RequestMetrics
+    Condition: S3RequestMetricsEnabled
+    Properties:
+      ServiceToken: !GetAtt S3RequestMetricsFunction.Arn
+      # Only affects the wording of a truncation message, not whether the sweep runs.
+      DailySweepScheduled: !Ref AutoEnableNewBuckets
+
+  S3RequestMetricsDailySweep:
+    Type: AWS::Events::Rule
+    Condition: DailySweepEnabled
+    Properties:
+      Description: Daily check that enables S3 request metrics on newly created buckets.
+      ScheduleExpression: rate(1 day)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt S3RequestMetricsFunction.Arn
+          Id: surfai-s3-metrics-sweep
+
+  S3RequestMetricsSweepPermission:
+    Type: AWS::Lambda::Permission
+    Condition: DailySweepEnabled
+    Properties:
+      FunctionName: !Ref S3RequestMetricsFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt S3RequestMetricsDailySweep.Arn
+
+Outputs:
+  RoleArn:
+    Description: ARN of the role. Provide this to your Surf AI representative.
+    Value: !If
+      - UseExistingRole
+      - !Sub "arn:aws:iam::${AWS::AccountId}:role/surfai-integration-role"
+      - !GetAtt SurfAiIntegrationRole.Arn
+  AccountRegion:
+    Description: Region of this account/stack. Provide this to your Surf AI representative.
+    Value: !Ref AWS::Region
+  S3RequestMetricsEnabled:
+    Description: Whether S3 request metrics were enabled by this stack.
+    Value: !Ref EnableS3RequestMetrics

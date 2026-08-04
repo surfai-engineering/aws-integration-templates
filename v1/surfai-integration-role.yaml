@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  (v1, rev 2026-08-03) Creates the cross-account IAM role assumed by Surf AI
+  (v1, rev 2026-08-04) Creates the cross-account IAM role assumed by Surf AI
   for read-only visibility into this AWS account, and optionally enables S3
   request metrics on S3 buckets. See
   https://github.com/surfai-engineering/aws-integration-templates/blob/main/CHANGELOG.md
@@ -14,6 +14,7 @@ Metadata:
         Parameters:
           - ExternalId
           - IfRoleAlreadyExists
+          - ManagedPolicyArns
       - Label:
           default: S3 request activity analysis (optional)
         Parameters:
@@ -24,6 +25,8 @@ Metadata:
         default: External ID (provided by Surf AI)
       IfRoleAlreadyExists:
         default: If the role "surfai-integration-role" already exists in this account
+      ManagedPolicyArns:
+        default: IAM managed policies to attach to the role (comma-separated ARNs)
       EnableS3RequestMetrics:
         default: Enable S3 request metrics on existing buckets?
       AutoEnableNewBuckets:
@@ -37,6 +40,20 @@ Parameters:
     MinLength: 20
     MaxLength: 1224
     AllowedPattern: "^[\\w+=,.@:/-]+$"
+  ManagedPolicyArns:
+    Type: CommaDelimitedList
+    Description: >-
+      Comma-separated list of IAM managed policy ARNs to attach to the role.
+      Defaults to the policies Surf AI's product features currently rely on
+      (see README for what each one grants). Narrowing this list can
+      silently break ingestion or actions that need a policy you removed;
+      widening it grants Surf AI's role additional read access. In
+      "use-existing" mode, the pre-existing role's attached policies must
+      match this list exactly. Changing this parameter on an already-deployed
+      stack updates the role's attached policies to match on the next
+      update.
+    Default: "arn:aws:iam::aws:policy/SecurityAudit,arn:aws:iam::aws:policy/ReadOnlyAccess,arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess,arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess"
+    AllowedPattern: "^arn:aws:iam::(aws|[0-9]{12}):policy/[\\w+=,.@-]+$"
   IfRoleAlreadyExists:
     Type: String
     Description: >-
@@ -86,7 +103,7 @@ Resources:
     Condition: CreateRole
     Properties:
       RoleName: surfai-integration-role
-      Description: Read-only role assumed by Surf AI to read this account's configuration, metadata, and resource data (including S3 object, DynamoDB item, and CloudWatch Logs content) for security analysis and product features.
+      Description: Role assumed by Surf AI for security analysis and product features. Access is scoped by the managed policies below (see the ManagedPolicyArns parameter).
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -110,11 +127,7 @@ Resources:
             Condition:
               ArnEquals:
                 "aws:PrincipalArn": "arn:aws:iam::861276082564:role/surfai/integration/surfai-customer-integration"
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/SecurityAudit
-        - arn:aws:iam::aws:policy/ReadOnlyAccess
-        - arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess
-        - arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess
+      ManagedPolicyArns: !Ref ManagedPolicyArns
       Tags:
         - Key: ManagedBy
           Value: surfai-integration
@@ -188,12 +201,6 @@ Resources:
               "arn:aws:iam::861276082564:root",
           }
           TRUSTED_ACTIONS = {"sts:AssumeRole", "sts:TagSession"}
-          REQUIRED_POLICY_ARNS = {
-              "arn:aws:iam::aws:policy/SecurityAudit",
-              "arn:aws:iam::aws:policy/ReadOnlyAccess",
-              "arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess",
-              "arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess",
-          }
 
           def statement_principals(st):
               # Returns principal strings, or None for any shape we don't recognize.
@@ -240,6 +247,7 @@ Resources:
                       send(event, "SUCCESS", "no-op")
                       return
                   expected_eid = event["ResourceProperties"]["ExternalId"]
+                  required_policy_arns = set(event["ResourceProperties"]["RequiredPolicyArns"])
                   iam = boto3.client("iam")
                   try:
                       role = iam.get_role(RoleName=ROLE)["Role"]
@@ -302,11 +310,11 @@ Resources:
                           ["trust policy does not allow sts:TagSession for Surf AI"])
                   attached = iam.list_attached_role_policies(RoleName=ROLE)["AttachedPolicies"]
                   attached_arns = {p["PolicyArn"] for p in attached}
-                  missing = REQUIRED_POLICY_ARNS - attached_arns
+                  missing = required_policy_arns - attached_arns
                   if missing:
                       problems.append("missing required managed policies: " +
                           ", ".join(sorted(a.rsplit("/", 1)[-1] for a in missing)))
-                  extra = [p for p in attached if p["PolicyArn"] not in REQUIRED_POLICY_ARNS]
+                  extra = [p for p in attached if p["PolicyArn"] not in required_policy_arns]
                   if extra:
                       # Matched by ARN, not name - a policy merely named like a required one is flagged.
                       extra_desc = sorted(f'{p["PolicyName"]} ({p["PolicyArn"]})' for p in extra)
@@ -340,6 +348,7 @@ Resources:
     Properties:
       ServiceToken: !GetAtt ExistingRoleValidationFunction.Arn
       ExternalId: !Ref ExternalId
+      RequiredPolicyArns: !Ref ManagedPolicyArns
 
   S3RequestMetricsFunctionRole:
     Type: AWS::IAM::Role

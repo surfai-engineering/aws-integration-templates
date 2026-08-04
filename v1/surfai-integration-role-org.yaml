@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  (v1, rev 2026-08-03) Organization-level Surf AI integration. Deploys the
+  (v1, rev 2026-08-04) Organization-level Surf AI integration. Deploys the
   Surf AI read-only integration role to every account in this AWS
   Organization via a service-managed StackSet (with automatic coverage of
   accounts added later), and creates the same role in this management
@@ -20,6 +20,7 @@ Metadata:
           - AlreadyConnectedAccountIds
           - CallAs
           - CreateManagementAccountRole
+          - ManagedPolicyArns
       - Label:
           default: S3 request activity analysis (optional, applied in every member account)
         Parameters:
@@ -38,6 +39,8 @@ Metadata:
         default: Deploying as management account or delegated admin?
       CreateManagementAccountRole:
         default: Also create the role in this account?
+      ManagedPolicyArns:
+        default: IAM managed policies to attach to the role (comma-separated ARNs)
       EnableS3RequestMetrics:
         default: Enable S3 request metrics on existing buckets?
       AutoEnableNewBuckets:
@@ -102,6 +105,21 @@ Parameters:
       role, if applicable) yourself, and keep it up to date.
     Default: "true"
     AllowedValues: ["true", "false"]
+  ManagedPolicyArns:
+    Type: CommaDelimitedList
+    Description: >-
+      Comma-separated list of IAM managed policy ARNs to attach to the role
+      - applied to every member account's role and to the management
+      account's role. Defaults to the policies Surf AI's product features
+      currently rely on (see README for what each one grants). Narrowing
+      this list can silently break ingestion or actions that need a policy
+      you removed; widening it grants Surf AI's role additional read access
+      in every covered account. In accounts already connected individually
+      (AlreadyConnectedAccountIds), the existing role's attached policies
+      must match this list exactly. Changing this parameter updates every
+      covered account's role on the next stack update.
+    Default: "arn:aws:iam::aws:policy/SecurityAudit,arn:aws:iam::aws:policy/ReadOnlyAccess,arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess,arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess"
+    AllowedPattern: "^arn:aws:iam::(aws|[0-9]{12}):policy/[\\w+=,.@-]+$"
   EnableS3RequestMetrics:
     Type: String
     Description: >-
@@ -143,7 +161,7 @@ Resources:
     Condition: ManagementRoleEnabled
     Properties:
       RoleName: surfai-integration-role
-      Description: Read-only role assumed by Surf AI for security analysis and to discover the organization's accounts.
+      Description: Role assumed by Surf AI for security analysis and to discover the organization's accounts. Access is scoped by the managed policies below (see the ManagedPolicyArns parameter).
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -166,11 +184,7 @@ Resources:
             Condition:
               ArnEquals:
                 "aws:PrincipalArn": "arn:aws:iam::861276082564:role/surfai/integration/surfai-customer-integration"
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/SecurityAudit
-        - arn:aws:iam::aws:policy/ReadOnlyAccess
-        - arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess
-        - arn:aws:iam::aws:policy/CloudWatchLogsReadOnlyAccess
+      ManagedPolicyArns: !Ref ManagedPolicyArns
       Tags:
         - Key: ManagedBy
           Value: surfai-integration
@@ -197,6 +211,8 @@ Resources:
           ParameterValue: !Ref ExternalId
         - ParameterKey: IfRoleAlreadyExists
           ParameterValue: "fail"
+        - ParameterKey: ManagedPolicyArns
+          ParameterValue: !Join [",", !Ref ManagedPolicyArns]
         - ParameterKey: EnableS3RequestMetrics
           ParameterValue: !Ref EnableS3RequestMetrics
         - ParameterKey: AutoEnableNewBuckets
@@ -249,6 +265,8 @@ Resources:
           ParameterValue: !Ref ExternalId
         - ParameterKey: IfRoleAlreadyExists
           ParameterValue: "use-existing"
+        - ParameterKey: ManagedPolicyArns
+          ParameterValue: !Join [",", !Ref ManagedPolicyArns]
         - ParameterKey: EnableS3RequestMetrics
           ParameterValue: !Ref EnableS3RequestMetrics
         - ParameterKey: AutoEnableNewBuckets

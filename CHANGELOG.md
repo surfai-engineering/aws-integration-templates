@@ -1,5 +1,12 @@
 # Changelog
 
+## v1 — 2026-08-04
+
+Added a `ManagedPolicyArns` parameter (both templates) controlling which IAM managed policies the role gets, instead of a fixed set. Defaults to the same four policies this template already used (`SecurityAudit`, `ReadOnlyAccess`, `CloudWatchReadOnlyAccess`, `CloudWatchLogsReadOnlyAccess`), so an existing stack updated to this revision with default parameters is unaffected. Lets Surf AI send each customer a CloudFormation console link with a permission set pre-filled to their needs instead of a fixed take-it-or-leave-it list.
+
+- The `use-existing` adoption validator's required-policy check is no longer a module-level Python constant - it now reads the list from the custom resource's `RequiredPolicyArns` property (itself sourced from `ManagedPolicyArns`), so adopting a role is validated against whatever this stack's parameter says, not a fixed set baked into the Lambda.
+- The org template forwards `ManagedPolicyArns` to both StackSets (`surfai-integration-role`, `surfai-integration-role-adopted-accounts`), so one org-level deploy applies the same customization to the management-account role and every member-account role consistently.
+
 ## v1 — 2026-08-03 (2)
 
 Org template:

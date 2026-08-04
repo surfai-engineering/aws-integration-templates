@@ -30,7 +30,7 @@ Unlike the org-level template, this one can be deployed by any IAM administrator
 
 ## What the role can access
 
-The role is read-only, but its scope is broader than basic inventory or config visibility — it can read resource *content*, not just metadata:
+By default (see [Customizing role permissions](#customizing-role-permissions) below to change this), the role is read-only, but its scope is broader than basic inventory or config visibility — it can read resource *content*, not just metadata:
 
 - `SecurityAudit` and `ReadOnlyAccess` (AWS managed policies): S3 object contents, DynamoDB items, CloudWatch Logs events, SQS message bodies (via `ReceiveMessage`), and more, across most AWS services.
 - `CloudWatchReadOnlyAccess` and `CloudWatchLogsReadOnlyAccess`: a small amount of additional coverage `ReadOnlyAccess` doesn't include.
@@ -45,6 +45,15 @@ The role is read-only, but its scope is broader than basic inventory or config v
 **Not included:** `secretsmanager:GetSecretValue`. Secrets Manager values specifically are out of reach — that exclusion is narrower than "no secrets," so check the list above against how your organization actually stores credentials.
 
 Trust requires a unique `ExternalId`, issued to you when you set up the integration, so that Surf AI's own systems can't be tricked into assuming the wrong customer's role. The External ID itself is not a secret — [AWS documents it as a confused-deputy safeguard, not an authentication factor](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-user_externalid.html), and this role can read its own trust policy (and therefore its own External ID) via `iam:Get*`. Treat it like any other non-sensitive configuration value, not a password.
+
+## Customizing role permissions
+
+Both templates take a `ManagedPolicyArns` parameter — a comma-separated list of IAM managed policy ARNs to attach to the role, defaulting to the four policies described above. Your Surf AI representative can send you a CloudFormation console link with this (and `ExternalId`) pre-filled to your account's specific needs, so you don't have to hand-edit parameters. To customize it yourself: pass a different comma-separated list, either at initial deploy or as a stack update to an already-connected account — CloudFormation attaches/detaches the role's managed policies to match on the next update, no manual IAM console work needed.
+
+Two things to know before narrowing the default set:
+
+- **Narrowing can silently break product features.** Surf AI's ingestion and actions rely on the default four policies; removing one may cause a specific capability to start failing without an obvious cause, rather than an upfront error. Check with your Surf AI representative before narrowing.
+- **In `use-existing` mode, this list is the source of truth for validation.** If you adopt a pre-existing role, its attached managed policies must match `ManagedPolicyArns` *exactly* — not the historical default four. An existing role with extra or missing policies relative to whatever you set here fails validation with a specific reason.
 
 ## S3 request metrics: not automatically cleaned up
 

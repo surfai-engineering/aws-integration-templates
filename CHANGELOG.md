@@ -1,5 +1,25 @@
 # Changelog
 
+## v1 — 2026-08-04 (4)
+
+`poc/v2/` no longer offers the S3 request-metrics feature. Its two parameters, the Lambda that enabled the `EntireBucket` filter, that function's execution role, log group, custom resource, daily-sweep rule and permission, and the corresponding stack output are all removed. The feature wrote to customer buckets (`s3:PutMetricsConfiguration`) and carried an ongoing CloudWatch cost, while the role in this variant has neither `cloudwatch:ListMetrics` nor `s3:ListAllMyBuckets` to discover what it produced. `poc/v2/`'s single-account template now takes two parameters, and its role is read-only in the strict sense: nothing it deploys changes the account. `v1/` and `poc/v1/` keep the feature unchanged.
+
+Also in `poc/v2/`: the org template no longer states that the management-account role lets Surf AI discover the organization's accounts. That variant does not grant `organizations:ListAccounts`, so the account list has to be supplied rather than discovered. Corrected in the template description, the `CreateManagementAccountRole` parameter description, and the IAM role's own description.
+
+Wording, across all six templates:
+
+- The stack description no longer carries a `(v1, rev <date>)` prefix or a raw repository URL. Each template now states plainly what it creates, and the `poc/v2/` one no longer mentions S3 request metrics, which it no longer deploys.
+
+- `AutoEnableNewBuckets` read "Also keep enabling request metrics on buckets created in the future?" in the single-account templates and "Keep enabling request metrics on future buckets too?" in the organization ones. Both now read "Keep enabling request metrics on buckets created in the future?".
+- `CreateManagementAccountRole` read "Also create the role in this account?" and now reads "Create the role in this management account?".
+- `CallAs` said "delegated admin"; it now says "a delegated administrator", matching AWS's own term.
+- `IfRoleAlreadyExists` was a sentence fragment; it now reads "What to do if the role ... already exists in this account", so the `fail` and `use-existing` values read as answers to a question.
+- The single-account templates' region output said "Region of this account/stack"; it now says "Region of this stack".
+
+The `IfRoleAlreadyExists` parameter now offers `create` (default) and `use-existing`, under the label "Create the role, or use one you already created?", so the values read as answers to the question. The previous `fail` value named the outcome of a name collision rather than the choice being made.
+
+**If you deployed an earlier revision, update this parameter before your next stack update.** A stack created with `IfRoleAlreadyExists=fail` will fail validation on its next update, because `fail` is no longer an accepted value. Set it to `create`, which behaves identically.
+
 ## v1 — 2026-08-04 (3)
 
 Added `poc/v2/`, a revision of the minimal-permission templates whose inline `SurfAiIntegrationReadOnly` policy is 9 statements and 19 actions. Relative to `poc/v1/` it drops `RDSReadOnly` (`rds:DescribeDBInstances`), `S3ReadOnly` (`s3:ListAllMyBuckets`), the whole `OrganizationsReadOnly` statement (`organizations:ListAccounts`, `organizations:DescribeOrganization`) and `cloudwatch:ListMetrics`. `poc/v1/` is left in place and unchanged, so anything already deployed from it keeps resolving the template it was deployed with.

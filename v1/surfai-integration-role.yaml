@@ -1,10 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  (v1, rev 2026-08-04) Creates the cross-account IAM role assumed by Surf AI
-  for read-only visibility into this AWS account, and optionally enables S3
-  request metrics on S3 buckets. See
-  https://github.com/surfai-engineering/aws-integration-templates/blob/main/CHANGELOG.md
-  for what this revision includes.
+  Creates the cross-account IAM role that Surf AI assumes for read-only visibility into this AWS account, and optionally enables S3 request metrics on your S3 buckets.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -24,13 +20,13 @@ Metadata:
       ExternalId:
         default: External ID (provided by Surf AI)
       IfRoleAlreadyExists:
-        default: If the role "surfai-integration-role" already exists in this account
+        default: Create the role, or use one you already created?
       ManagedPolicyArns:
         default: IAM managed policies to attach to the role (comma-separated ARNs)
       EnableS3RequestMetrics:
         default: Enable S3 request metrics on existing buckets?
       AutoEnableNewBuckets:
-        default: Also keep enabling request metrics on buckets created in the future?
+        default: Keep enabling request metrics on buckets created in the future?
 
 Parameters:
   ExternalId:
@@ -45,9 +41,10 @@ Parameters:
     Description: >-
       Comma-separated list of IAM managed policy ARNs to attach to the role.
       Defaults to the policies Surf AI's product features currently rely on
-      (see README for what each one grants). Narrowing this list can
-      silently break ingestion or actions that need a policy you removed;
-      widening it grants Surf AI's role additional read access. In
+      (see the README for what each one grants). Narrowing this list may
+      prevent Surf AI from retrieving data that depends on a policy you
+      removed, without an upfront error; widening it grants the role
+      additional read access. In
       "use-existing" mode, the pre-existing role's attached policies must
       match this list exactly. Changing this parameter on an already-deployed
       stack updates the role's attached policies to match on the next
@@ -57,15 +54,16 @@ Parameters:
   IfRoleAlreadyExists:
     Type: String
     Description: >-
-      Leave "fail" (default) to create the role; stack creation fails if a
-      role named "surfai-integration-role" already exists. Choose
-      "use-existing" if the role was already created (for example via the
-      manual setup): the stack will not modify it, and will instead verify
-      that its trust policy and permissions match what Surf AI requires,
-      failing with a detailed reason if not. To replace a misconfigured
-      existing role, delete it in the IAM console and deploy with "fail".
-    Default: "fail"
-    AllowedValues: ["fail", "use-existing"]
+      Leave "create" (default) to have this stack create the role. Stack
+      creation stops with an error if a role named
+      "surfai-integration-role" already exists, rather than modifying it.
+      Choose "use-existing" if you created the role yourself: the stack
+      leaves it alone and verifies that its trust policy and permissions
+      match what Surf AI requires, reporting a specific reason if they do
+      not. To replace a role that does not pass verification, delete it in
+      the IAM console and deploy again with "create".
+    Default: "create"
+    AllowedValues: ["create", "use-existing"]
   EnableS3RequestMetrics:
     Type: String
     Description: >-
@@ -73,8 +71,9 @@ Parameters:
       "EntireBucket") on all S3 buckets that currently exist in this account,
       allowing Surf AI to analyze S3 request activity. Buckets that already
       have an "EntireBucket" filter are left untouched. S3 request metrics
-      may incur additional CloudWatch costs (roughly $5/month per bucket
-      that receives requests - see README).
+      may incur additional CloudWatch costs, about $4.80 per month for each
+      bucket that receives requests. See the README for how that is
+      calculated.
     Default: "true"
     AllowedValues: ["true", "false"]
   AutoEnableNewBuckets:
@@ -90,7 +89,7 @@ Parameters:
     AllowedValues: ["true", "false"]
 
 Conditions:
-  CreateRole: !Equals [!Ref IfRoleAlreadyExists, "fail"]
+  CreateRole: !Equals [!Ref IfRoleAlreadyExists, "create"]
   UseExistingRole: !Equals [!Ref IfRoleAlreadyExists, "use-existing"]
   S3RequestMetricsEnabled: !Equals [!Ref EnableS3RequestMetrics, "true"]
   DailySweepEnabled: !And
@@ -550,7 +549,7 @@ Outputs:
       - !Sub "arn:aws:iam::${AWS::AccountId}:role/surfai-integration-role"
       - !GetAtt SurfAiIntegrationRole.Arn
   AccountRegion:
-    Description: Region of this account/stack. Provide this to your Surf AI representative.
+    Description: Region of this stack. Provide this to your Surf AI representative.
     Value: !Ref AWS::Region
   S3RequestMetricsEnabled:
     Description: Whether S3 request metrics were enabled by this stack.

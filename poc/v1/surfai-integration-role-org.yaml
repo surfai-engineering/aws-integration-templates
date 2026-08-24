@@ -69,7 +69,10 @@ Parameters:
       template) before deploying this stack. Unlike ExcludedAccountIds
       above, these accounts still receive Surf AI access: their existing
       role is left untouched and verified instead of being recreated. Leave
-      empty if none.
+      empty if none. Set this when you first deploy: adding an account here
+      later, once this stack has already created that account's role, moves
+      the account between two StackSets in one update and can delete the
+      role while reporting success. See the README before editing it.
     Default: ""
   CallAs:
     Type: String

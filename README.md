@@ -14,7 +14,7 @@ Organization-level deployment via CloudFormation StackSet. Run it from your AWS 
 - Create the role directly in the management account as well, since StackSets cannot deploy there.
 - Enable S3 request metrics on your buckets, existing and future, by default (turn off with the `EnableS3RequestMetrics` parameter).
 
-If some accounts in scope already have `surfai-integration-role` from a prior standalone connection, list them in `AlreadyConnectedAccountIds`. This template deploys two StackSets: `surfai-integration-role` creates the role fresh in every other account (fails if the role is already there), and `surfai-integration-role-adopted-accounts` adopts and validates the existing role in the accounts you listed, without touching the ones created later — that split, not a single shared setting, is what lets a mixed org (some accounts already connected, most not) work correctly. Both StackSets tolerate per-account failures so that one bad account doesn't block the rest, which means the top-level operation can report `SUCCEEDED` even when some individual accounts failed. Always check **CloudFormation → StackSets → surfai-integration-role → Stack instances** and **CloudFormation → StackSets → surfai-integration-role-adopted-accounts → Stack instances** for the real per-account status rather than trusting the top-level operation result.
+If some accounts in scope already have `surfai-integration-role` from a prior standalone connection, list them in `AlreadyConnectedAccountIds` when you first deploy — see [`AlreadyConnectedAccountIds` is a deploy-time list](#alreadyconnectedaccountids-is-a-deploy-time-list-not-an-editable-one) before adding to it later. This template deploys two StackSets: `surfai-integration-role` creates the role fresh in every other account (fails if the role is already there), and `surfai-integration-role-adopted-accounts` adopts and validates the existing role in the accounts you listed, without touching the ones created later — that split, not a single shared setting, is what lets a mixed org (some accounts already connected, most not) work correctly. Both StackSets tolerate per-account failures so that one bad account doesn't block the rest, which means the top-level operation can report `SUCCEEDED` even when some individual accounts failed. Always check **CloudFormation → StackSets → surfai-integration-role → Stack instances** and **CloudFormation → StackSets → surfai-integration-role-adopted-accounts → Stack instances** for the real per-account status rather than trusting the top-level operation result.
 
 ### `v1/surfai-integration-role.yaml`
 
@@ -61,6 +61,47 @@ Enabling S3 request metrics (`EnableS3RequestMetrics=true`, the default) publish
 
 ```
 aws s3api delete-bucket-metrics-configuration --bucket <bucket-name> --id EntireBucket
+```
+
+## A stack cannot adopt the role it created itself
+
+If you deployed with the role-creation option set to `create` and later change it to `use-existing`, the update is refused:
+
+```
+this stack created surfai-integration-role itself, so it cannot also adopt it
+- switching to 'use-existing' would delete the role, so the update was refused
+and the role is unchanged. See the repository README if you need the role
+managed outside this stack.
+```
+
+The stack ends in `UPDATE_ROLLBACK_COMPLETE` and the role is left exactly as it was, same role ID, same policies. Nothing needs repairing: the rollback also restores the previous parameter values, so the stack is already back on `create`.
+
+The refusal is deliberate. `use-existing` means "this role is managed somewhere else, verify it and leave it alone", so selecting it hands the role out of this stack's ownership and CloudFormation deletes the role it no longer owns. Before this check existed that update reported `UPDATE_COMPLETE` and the role was gone.
+
+### If you want the role managed outside this stack
+
+There is no in-place conversion, because the role's lifecycle is tied to the stack that created it. The supported sequence, in an account whose role this stack created:
+
+1. Delete this stack. The role goes with it, and Surf AI loses access to the account.
+2. Create `surfai-integration-role` in whatever should own it — a separate CloudFormation stack, Terraform, or the IAM console — matching what this template produces: the same role name, both trust statements with your `ExternalId`, and exactly the managed policies you intend to pass in `ManagedPolicyArns`.
+3. Deploy this template again with the role-creation option set to `use-existing`. It validates the role and names precisely whatever does not match.
+
+## `AlreadyConnectedAccountIds` is a deploy-time list, not an editable one
+
+`AlreadyConnectedAccountIds` describes which accounts already had a `surfai-integration-role` **before this org stack existed**. Adding an account to it afterwards is not a safe edit.
+
+An account already covered by this stack has its role from the `surfai-integration-role` StackSet. Adding it to `AlreadyConnectedAccountIds` drops it out of that StackSet — deleting the role — while the `surfai-integration-role-adopted-accounts` StackSet takes it over and validates it. CloudFormation does not order those two operations against each other, so the adoption can validate a role that is deleted moments later, and the stack update can report success with the integration broken in that account. The per-stack check described above cannot catch it, because the role belongs to a different stack than the one running the check.
+
+If an account in the list needs to change hands, do it as its own operation with the outcome checked per account, rather than as an edit rolled into an unrelated stack update.
+
+## Deleting a `use-existing` stack leaves one empty log group behind
+
+A stack deployed with the role-creation option set to `use-existing` runs a small validation Lambda, which logs to `/surfai/integration/<stack-name>-role-validation` with 30-day retention. When you delete the stack, CloudFormation deletes that log group — but the Lambda's final log lines are usually still being delivered at that moment, and the Lambda service recreates the group to accept them, using the `logs:CreateLogGroup` permission on the function's execution role. The recreated group is empty apart from those last lines, and has **no retention set**, so it does not expire on its own.
+
+It costs effectively nothing, but it is not cleaned up for you. To remove it:
+
+```
+aws logs delete-log-group --log-group-name /surfai/integration/<stack-name>-role-validation --region <region>
 ```
 
 ## How trust is scoped, and why `sts:TagSession` carries a different condition than `sts:AssumeRole`

@@ -19,6 +19,15 @@ it belongs to.
 
 Both fixes apply to all three single-account templates (`v1/`, `poc/v1/`, `poc/v2/`).
 
+**A stack already running `use-existing` installs the new code without re-running the validator.**
+That update changes the validation Lambda's code in place, so its ARN — and with it every property
+of the custom resource that invokes it — is unchanged, and CloudFormation has no reason to invoke
+it. The role is not re-validated by that update. The new refusal takes effect the next time the
+custom resource actually runs: when a stack is created, or when an update changes the External ID
+or the managed-policy list. Nothing is missed in the meantime, because the case being fixed —
+switching a stack from `create` to `use-existing` — creates the custom resource fresh, and so is
+covered from the moment you update.
+
 **Organization deployments do not pick this up by updating the org stack alone.** The org
 template points its StackSets at an unversioned template URL, and updating the org stack does
 not by itself change any StackSet property, so member accounts keep the template body captured

@@ -356,9 +356,9 @@ Resources:
 
           def stack_already_creates_role(event):
               """True when this same stack still manages the role - adopting it would delete it."""
-              # Bounded so a hung control plane still leaves the function time to answer CloudFormation.
+              # One request per try - max_attempts counts *retries*, and 2 x 13s x 3 tries outruns the 60s Timeout.
               cfn = boto3.client("cloudformation", config=Config(
-                  connect_timeout=5, read_timeout=8, retries={"max_attempts": 1}))
+                  connect_timeout=5, read_timeout=8, retries={"total_max_attempts": 1}))
               stack_id, last_error = event["StackId"], None
               for attempt in range(3):
                   try:

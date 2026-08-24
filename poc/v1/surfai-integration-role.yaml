@@ -217,6 +217,9 @@ Resources:
                   - "logs:CreateLogStream"
                   - "logs:PutLogEvents"
                 Resource: "arn:aws:logs:*:*:*"
+              - Effect: Allow
+                Action: "cloudformation:ListStackResources"
+                Resource: !Ref AWS::StackId
       Tags:
         - Key: ManagedBy
           Value: surfai-integration
@@ -244,6 +247,8 @@ Resources:
       Code:
         ZipFile: |
           import boto3, json, time, urllib.request
+          from botocore.config import Config
+          from botocore.exceptions import BotoCoreError, ClientError
 
           class ResponseDeliveryError(Exception):
               """Delivery failure, not a validation result - must not be caught as generic Exception."""
@@ -349,10 +354,38 @@ Resources:
               print(f"failed to deliver CloudFormation response after 3 attempts: {last_error}")
               raise ResponseDeliveryError(last_error)
 
+          def stack_already_creates_role(event):
+              """True when this same stack still manages the role - adopting it would delete it."""
+              # Bounded so a hung control plane still leaves the function time to answer CloudFormation.
+              cfn = boto3.client("cloudformation", config=Config(
+                  connect_timeout=5, read_timeout=8, retries={"max_attempts": 1}))
+              stack_id, last_error = event["StackId"], None
+              for attempt in range(3):
+                  try:
+                      pages = cfn.get_paginator("list_stack_resources").paginate(StackName=stack_id)
+                      # Matched on physical ID so renaming the role's logical ID cannot silently disable this.
+                      return any(r["ResourceType"] == "AWS::IAM::Role"
+                                 and r.get("PhysicalResourceId") == ROLE
+                                 for page in pages for r in page["StackResourceSummaries"])
+                  except (BotoCoreError, ClientError) as e:
+                      last_error = e
+                      if attempt < 2:
+                          time.sleep(2 ** attempt)
+              raise Exception(
+                  f"could not check whether this stack already manages {ROLE}, so it was not "
+                  f"adopted - retry once the error below clears: {last_error}")
+
           def handler(event, context):
               try:
                   if event["RequestType"] == "Delete":
                       send(event, "SUCCESS", "no-op")
+                      return
+                  if stack_already_creates_role(event):
+                      send(event, "FAILED",
+                           f"this stack created {ROLE} itself, so it cannot also adopt it - "
+                           "switching to 'use-existing' would delete the role, so the update "
+                           "was refused and the role is unchanged. See the repository README "
+                           "if you need the role managed outside this stack.")
                       return
                   expected_eid = event["ResourceProperties"]["ExternalId"]
                   required_display = action_map(event["ResourceProperties"]["RequiredPolicyDocument"])
@@ -363,7 +396,7 @@ Resources:
                   except iam.exceptions.NoSuchEntityException:
                       send(event, "FAILED",
                            f"role {ROLE} does not exist in this account - "
-                           "redeploy with 'If the role already exists' set to 'fail' to create it")
+                           "redeploy with the role-creation option set to 'create'")
                       return
                   problems, assume_ok, tag_ok = [], False, False
                   eid_problems, tag_problems = [], []

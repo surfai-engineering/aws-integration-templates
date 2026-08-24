@@ -1,5 +1,31 @@
 # Changelog
 
+## v1 — 2026-08-24
+
+Fixes a way to destroy a working integration through a normal stack update.
+
+**Switching the role-creation option from `create` to `use-existing` on a stack that created the role deleted that role, and the update reported success.** CloudFormation dropped the role from the stack while adding the adoption validator, and because the validator runs before the cleanup phase it inspected the still-present role, passed it, and the role was deleted moments later — leaving `UPDATE_COMPLETE` on a stack whose integration no longer worked. The validator now refuses to adopt a role that this same stack still manages, so the update fails and rolls back with the role intact. Adopting a role that *this* stack does not manage — created by hand, by Terraform, or by a different CloudFormation stack — is unaffected, which is what the org template's `AlreadyConnectedAccountIds` relies on.
+
+The check is scoped to the stack running it, and that scope is a real limit rather than a detail: it cannot see a role that a *different* stack is about to delete in the same operation. At organization level that case is reachable by adding an account to `AlreadyConnectedAccountIds` after this stack has already given that account a role — see "`AlreadyConnectedAccountIds` is a deploy-time list" in the README before editing that parameter on a deployed org stack.
+
+This is most likely to be hit while updating from a revision published before 2026-08-04, because the old `fail` value is no longer accepted and that update forces you to choose a new value. The value that behaves identically to `fail` is `create`.
+
+**The validator's "role does not exist" message told you to redeploy with the option set to `fail`,** which the previous revision removed as an accepted value. It now names `create`.
+
+The check costs one new permission in your account: the validation Lambda's execution role now
+carries `cloudformation:ListStackResources`, scoped to that stack's own ARN. It is granted only in
+`use-existing` deployments, where that role already exists, and it reads nothing outside the stack
+it belongs to.
+
+Both fixes apply to all three single-account templates (`v1/`, `poc/v1/`, `poc/v2/`).
+
+**Organization deployments do not pick this up by updating the org stack alone.** The org
+template points its StackSets at an unversioned template URL, and updating the org stack does
+not by itself change any StackSet property, so member accounts keep the template body captured
+at their last StackSet update. Push a StackSet update to roll this out to member accounts.
+
+Also documented in the README: what the refusal above looks like and how to recover from it, the supported sequence for moving the role out of this stack's ownership, why `AlreadyConnectedAccountIds` must not be extended after deployment, and the empty `/surfai/integration/<stack-name>-role-validation` log group that deleting a `use-existing` stack leaves behind with no retention set.
+
 ## v1 — 2026-08-04 (4)
 
 `poc/v2/` no longer offers the S3 request-metrics feature. Its two parameters, the Lambda that enabled the `EntireBucket` filter, that function's execution role, log group, custom resource, daily-sweep rule and permission, and the corresponding stack output are all removed. The feature wrote to customer buckets (`s3:PutMetricsConfiguration`) and carried an ongoing CloudWatch cost, while the role in this variant has neither `cloudwatch:ListMetrics` nor `s3:ListAllMyBuckets` to discover what it produced. `poc/v2/`'s single-account template now takes two parameters, and its role is read-only in the strict sense: nothing it deploys changes the account. `v1/` and `poc/v1/` keep the feature unchanged.

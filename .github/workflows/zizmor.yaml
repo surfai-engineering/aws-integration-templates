@@ -1,0 +1,43 @@
+name: Zizmor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**.yaml"
+      - ".github/workflows/**.yml"
+      - ".github/zizmor.yml"
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    name: Zizmor (GitHub Workflows Security)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: |
+            .github
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - uses: zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7
+        with:
+          inputs: .github/
+          version: "1.26.1"
+          min-severity: "high"
+          online-audits: "true"
+          advanced-security: "false"
+          annotations: "true"
+          fail-on-no-inputs: "true"

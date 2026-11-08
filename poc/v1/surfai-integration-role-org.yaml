@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Deploys the Surf AI read-only integration role to every account in this AWS Organization, using a service-managed StackSet that also covers accounts added later, and creates the same role in this management account so Surf AI can discover the organization's accounts.
+  Deploy this template as a regular stack (Create stack), not as a StackSet. The stack deploys the Surf AI read-only integration role to every account in this AWS Organization by creating a service-managed StackSet that also covers accounts added later, and creates the same role in this management account so Surf AI can discover the organization's accounts.
 
 Metadata:
   AWS::CloudFormation::Interface:

@@ -8,7 +8,7 @@ Deploying one of these grants Surf AI a read-only role in your account (or your 
 
 ### `v1/surfai-integration-role-org.yaml`
 
-Organization-level deployment via CloudFormation StackSet. Run it from your AWS Organizations management account (or a registered delegated administrator) and it will:
+Organization-level deployment. Deploy it once as a regular CloudFormation stack (**Create stack**, not **Create StackSet**) in your AWS Organizations management account (or a registered delegated administrator). The stack creates the StackSets itself; creating a StackSet from this template fails. It will:
 
 - Create a cross-account IAM role, `surfai-integration-role`, in every account across the Organizational Unit(s) you choose — including accounts added later, unless you exclude them.
 - Create the role directly in the management account as well, since StackSets cannot deploy there.
